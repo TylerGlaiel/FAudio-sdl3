@@ -109,10 +109,10 @@ extern void FAudio_Log(char const *msg);
 	((x << 24)	& 0x00FF000000000000) | \
 	((x << 32)	& 0xFF00000000000000)
 #else
-#include <SDL_stdinc.h>
-#include <SDL_assert.h>
-#include <SDL_endian.h>
-#include <SDL_log.h>
+#include <SDL3/SDL_stdinc.h>
+#include <SDL3/SDL_assert.h>
+#include <SDL3/SDL_endian.h>
+#include <SDL3/SDL_log.h>
 
 #define FAudio_malloc SDL_malloc
 #define FAudio_realloc SDL_realloc

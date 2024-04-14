@@ -28,7 +28,7 @@
 
 #include "FAudio_internal.h"
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 
 #if !SDL_VERSION_ATLEAST(2, 24, 0)
 #error "SDL version older than 2.24.0"
@@ -47,6 +47,26 @@ static void FAudio_INTERNAL_MixCallback(void *userdata, Uint8 *stream, int len)
 			audio,
 			(float*) stream
 		);
+	}
+}
+
+//taken+modified from SDL3 migration guide
+void SDLCALL MyNewAudioCallback(void* userdata, SDL_AudioStream* stream, int additional_amount, int total_amount) {
+	/* Calculate a little more audio here, maybe using `userdata`, write it to `stream`
+	 *
+	 * If you want to use the original callback, you could do something like this:
+	 */
+	FAudio* audio = (FAudio*)userdata;
+	int update_chunk_size = audio->updateSize * sizeof(float) * audio->master->master.inputChannels;
+
+	while(additional_amount > 0) {
+		Uint8* data = SDL_stack_alloc(Uint8, update_chunk_size);
+		if(data) {
+			FAudio_INTERNAL_MixCallback(userdata, data, update_chunk_size);
+			SDL_PutAudioStreamData(stream, data, update_chunk_size);
+			SDL_stack_free(data);
+		}
+		additional_amount -= update_chunk_size;
 	}
 }
 
@@ -142,42 +162,45 @@ void FAudio_PlatformInit(
 	void** platformDevice
 ) {
 	SDL_AudioDeviceID device;
-	SDL_AudioSpec want, have;
+	SDL_AudioStream* stream;
+	SDL_AudioSpec want/*, have*/;
+	int wantsamples;
 
 	FAudio_assert(mixFormat != NULL);
 	FAudio_assert(updateSize != NULL);
 
 	/* Build the device spec */
 	want.freq = mixFormat->Format.nSamplesPerSec;
-	want.format = AUDIO_F32SYS;
+	want.format = SDL_AUDIO_F32;
 	want.channels = mixFormat->Format.nChannels;
-	want.silence = 0;
-	want.callback = FAudio_INTERNAL_MixCallback;
-	want.userdata = audio;
+
 	if (flags & FAUDIO_1024_QUANTUM)
 	{
 		/* Get the sample count for a 21.33ms frame.
 		 * For 48KHz this should be 1024.
 		 */
-		want.samples = (int) (
+		wantsamples = (int) (
 			want.freq / (1000.0 / (64.0 / 3.0))
 		);
 	}
 	else
 	{
-		want.samples = want.freq / 100;
+		wantsamples = want.freq / 100;
 	}
 
 	/* Open the device (or at least try to) */
 iosretry:
-	device = SDL_OpenAudioDevice(
+	/*device = SDL_OpenAudioDevice(
 		deviceIndex > 0 ? SDL_GetAudioDeviceName(deviceIndex - 1, 0) : NULL,
 		0,
 		&want,
 		&have,
 		0
-	);
-	if (device == 0)
+	);*/
+
+	stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_OUTPUT, &want, MyNewAudioCallback, audio);
+
+	if (!stream)
 	{
 		const char *err = SDL_GetError();
 		SDL_Log("OpenAudioDevice failed: %s", err);
@@ -205,32 +228,33 @@ iosretry:
 	/* Write up the received format for the engine */
 	WriteWaveFormatExtensible(
 		mixFormat,
-		have.channels,
-		have.freq,
+		want.channels,
+		want.freq,
 		&DATAFORMAT_SUBTYPE_IEEE_FLOAT
 	);
-	*updateSize = have.samples;
+	*updateSize = wantsamples;
 
-	/* SDL_AudioDeviceID is a Uint32, anybody using a 16-bit PC still? */
-	*platformDevice = (void*) ((size_t) device);
+	*platformDevice = stream;
 
 	/* Start the thread! */
-	SDL_PauseAudioDevice(device, 0);
+	SDL_ResumeAudioDevice(SDL_GetAudioStreamDevice(stream));
 }
 
 void FAudio_PlatformQuit(void* platformDevice)
 {
-	SDL_CloseAudioDevice((SDL_AudioDeviceID) ((size_t) platformDevice));
+	SDL_DestroyAudioStream((SDL_AudioStream*)platformDevice);
 }
 
 uint32_t FAudio_PlatformGetDeviceCount()
 {
-	uint32_t devCount = SDL_GetNumAudioDevices(0);
-	if (devCount == 0)
+	int num_devices;
+	SDL_AudioDeviceID* devices = SDL_GetAudioOutputDevices(&num_devices);
+	if (!devices)
 	{
 		return 0;
 	}
-	return devCount + 1; /* Add one for "Default Device" */
+	SDL_free(devices);
+	return num_devices + 1; /* Add one for "Default Device" */
 }
 
 void FAudio_UTF8_To_UTF16(const char *src, uint16_t *dst, size_t len);
@@ -306,14 +330,14 @@ uint32_t FAudio_PlatformGetDeviceDetails(
 	if (index == 0)
 	{
 		/* TODO: Do we want to squeeze the name into the output? */
-		if (SDL_GetDefaultAudioInfo(NULL, &spec, 0) < 0)
+		if (SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_OUTPUT, &spec, NULL) < 0)
 		{
 			SDL_zero(spec);
 		}
 	}
 	else
 	{
-		SDL_GetAudioDeviceSpec(index - 1, 0, &spec);
+		SDL_GetAudioDeviceFormat(index - 1, &spec, NULL);
 	}
 	if ((spec.freq > 0) && (rate <= 0))
 	{
@@ -370,7 +394,7 @@ void FAudio_PlatformThreadPriority(FAudioThreadPriority priority)
 
 uint64_t FAudio_PlatformGetThreadID(void)
 {
-	return (uint64_t) SDL_ThreadID();
+	return (uint64_t) SDL_GetCurrentThreadID();
 }
 
 FAudioMutex FAudio_PlatformCreateMutex()
@@ -380,17 +404,17 @@ FAudioMutex FAudio_PlatformCreateMutex()
 
 void FAudio_PlatformDestroyMutex(FAudioMutex mutex)
 {
-	SDL_DestroyMutex((SDL_mutex*) mutex);
+	SDL_DestroyMutex((SDL_Mutex*) mutex);
 }
 
 void FAudio_PlatformLockMutex(FAudioMutex mutex)
 {
-	SDL_LockMutex((SDL_mutex*) mutex);
+	SDL_LockMutex((SDL_Mutex*) mutex);
 }
 
 void FAudio_PlatformUnlockMutex(FAudioMutex mutex)
 {
-	SDL_UnlockMutex((SDL_mutex*) mutex);
+	SDL_UnlockMutex((SDL_Mutex*) mutex);
 }
 
 void FAudio_sleep(uint32_t ms)
@@ -407,16 +431,26 @@ uint32_t FAudio_timems()
 
 /* FAudio I/O */
 
+//copied from SDL3 migration guide
+static size_t SDL_ReadIOAdapter(SDL_IOStream* stream, void* ptr, size_t size, size_t nitems) {
+	if(size > 0 && nitems > 0) {
+		return SDL_ReadIO(stream, ptr, size * nitems) / size;
+	}
+	return 0;
+}
+
+
 FAudioIOStream* FAudio_fopen(const char *path)
 {
 	FAudioIOStream *io = (FAudioIOStream*) FAudio_malloc(
 		sizeof(FAudioIOStream)
 	);
-	SDL_RWops *rwops = SDL_RWFromFile(path, "rb");
+	SDL_IOStream *rwops = SDL_IOFromFile(path, "rb");
+
 	io->data = rwops;
-	io->read = (FAudio_readfunc) rwops->read;
-	io->seek = (FAudio_seekfunc) rwops->seek;
-	io->close = (FAudio_closefunc) rwops->close;
+	io->read = (FAudio_readfunc)SDL_ReadIOAdapter;
+	io->seek = (FAudio_seekfunc) SDL_SeekIO;
+	io->close = (FAudio_closefunc) SDL_CloseIO;
 	io->lock = FAudio_PlatformCreateMutex();
 	return io;
 }
@@ -426,20 +460,21 @@ FAudioIOStream* FAudio_memopen(void *mem, int len)
 	FAudioIOStream *io = (FAudioIOStream*) FAudio_malloc(
 		sizeof(FAudioIOStream)
 	);
-	SDL_RWops *rwops = SDL_RWFromMem(mem, len);
+	SDL_IOStream *rwops = SDL_IOFromMem(mem, len);
 	io->data = rwops;
-	io->read = (FAudio_readfunc) rwops->read;
-	io->seek = (FAudio_seekfunc) rwops->seek;
-	io->close = (FAudio_closefunc) rwops->close;
+	io->read = (FAudio_readfunc)SDL_ReadIOAdapter;
+	io->seek = (FAudio_seekfunc)SDL_SeekIO;
+	io->close = (FAudio_closefunc)SDL_CloseIO;
 	io->lock = FAudio_PlatformCreateMutex();
 	return io;
 }
 
 uint8_t* FAudio_memptr(FAudioIOStream *io, size_t offset)
 {
-	SDL_RWops *rwops = (SDL_RWops*) io->data;
+	return NULL; //TODO
+	/*SDL_IOStream *rwops = (SDL_IOStream*) io->data;
 	FAudio_assert(rwops->type == SDL_RWOPS_MEMORY);
-	return rwops->hidden.mem.base + offset;
+	return rwops->hidden.mem.base + offset;*/
 }
 
 void FAudio_close(FAudioIOStream *io)
